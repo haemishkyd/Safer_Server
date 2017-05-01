@@ -28,6 +28,55 @@ def haversine(lon1, lat1, lon2, lat2):
     r = 6371 # Radius of earth in kilometers. Use 3956 for miles
     return c * r
 
+def build_response():
+    #We need these to be the global ones since these have been set up to access the database
+    global db
+    global cur
+    #please see calls_query.sql for this query in a better format
+    query_string=("SELECT final_calls.agent_id, current.lat_data, current.long_data, final_calls.call_flag, final_calls.user_that_called, final_calls.call_timestamp, final_calls.lat_data, final_calls.long_data,people.user_agent_type FROM agent_current_info AS current, ( ( SELECT u.`agent_id`, u.`lat_data`, u.`long_data`, u.`call_flag`, u.`user_that_called`, u.`call_timestamp` FROM agent_calls AS u INNER JOIN ( SELECT `agent_id`, MAX(`call_timestamp`) AS time_stamp FROM agent_calls GROUP BY `agent_id` ) AS q ON u.`agent_id` = q.`agent_id` AND u.`call_timestamp` = q.`time_stamp` ) AS final_calls ),operator_list as people WHERE final_calls.agent_id = current.agent_id AND final_calls.agent_id = people.agent_id AND current.online_flag = 1")
+    cur.execute(query_string)
+    agent_data = cur.fetchall ()
+    db.commit()
+    xml_string_build = "<user_data>"
+    for row in agent_data :                
+        xml_string_build += "<agent_pos>"
+        xml_string_build += "<agent_id>"+str(row[0])+"</agent_id>"
+        xml_string_build += "<latitude>"+str(row[1])+"</latitude>"
+        xml_string_build += "<longitude>"+str(row[2])+"</longitude>"
+        xml_string_build += "<responding_status>"+str(row[3])+"</responding_status>"
+        xml_string_build += "<responding_to_user>"+str(row[4])+"</responding_to_user>"
+        xml_string_build += "<responding_operator_role>"+str(row[8])+"</responding_operator_role>"
+        #if this agent is to respond tell him where to go
+        if (row[3] == 1):
+            xml_string_build += "<respond_to_latitude>"+str(row[6])+"</respond_to_latitude>"
+            xml_string_build += "<respond_to_longitude>"+str(row[7])+"</respond_to_longitude>"
+        xml_string_build += "</agent_pos>"
+    xml_string_build += "</user_data>"
+
+    return xml_string_build
+
+def build_login_response(passedusername):
+    #We need these to be the global ones since these have been set up to access the database
+    global db
+    global cur
+    #please see calls_query.sql for this query in a better format
+    query_string=("SELECT * FROM operator_list WHERE username='"+passedusername+"'")
+    cur.execute(query_string)
+    agent_data = cur.fetchall ()
+    db.commit()
+    xml_string_build = "<login_data>"
+    for row in agent_data :        
+        xml_string_build += "<operator_id>"+str(row[0])+"</operator_id>"
+        xml_string_build += "<name>"+str(row[1])+"</name>"
+        xml_string_build += "<surname>"+str(row[2])+"</surname>"
+        xml_string_build += "<username>"+str(row[4])+"</username>"
+        xml_string_build += "<user_agent_type>"+str(row[6])+"</user_agent_type>"
+        if (row[6] == 1):
+            xml_string_build += "<company>"+str(row[3])+"</company>"        
+    xml_string_build += "</login_data>"
+
+    return xml_string_build
+
 logdiagdata("Waiting for startup to be complete...")
 time.sleep(2)
 logdiagdata("Startup complete!")
@@ -52,7 +101,6 @@ cur = db.cursor()
 
 server_run = True
 closest_agent = 0
-user_that_called = 0
 message_type = None
 
 while server_run:
@@ -67,102 +115,123 @@ while server_run:
                 e=ET.fromstring(str(data))
                 #*******************************    
                 #CHECK THE USER MESSAGES
-                #*******************************
-                #message_type = e.find('user_data')
+                #*******************************                
                 message_type = e.tag
-                print(message_type)
                 if (message_type == 'user_data'):
+                    logdiagdata("--Update Request")
                     lat_string=e.find('LatData').text
                     long_string=e.find('LongData').text
                     user_id = e.find('UserId').text
                     call_flag = e.find('CallFlag').text
-                    logdiagdata("<<User:"+user_id+" Lat:"+lat_string+" Long:"+long_string+" Call Flag:"+call_flag+">>")
-                    logdiagdata("--Update User Pos")
-                    closest_agent = 0
-                    user_that_called = 0
-                    if (call_flag == '1'):
+                    agent_type = e.find('TypeRequested').text                    
+                    #logdiagdata("<<User:"+user_id+" Lat:"+lat_string+" Long:"+long_string+" Call Flag:"+call_flag+">>")                    
+                    if (call_flag == '1'):                        
+                        #################################################################
+                        #                   FIND THE CLOSEST AGENT
+                        #################################################################
                         #find the closest guy
-                        closest_agent = 1
-                        user_that_called = user_id;
-                        #end of find the closest guy
+                        query_string=("SELECT * FROM agent_current_info,operator_list WHERE online_flag = 1 AND user_agent_type="+agent_type+" AND agent_current_info.agent_id=operator_list.agent_id")
+                        cur.execute(query_string)
+                        agent_data = cur.fetchall ()
+                        db.commit()
+                        distance_calculated=1000000                        
+                        for row in agent_data :
+                            new_distance = haversine(float(long_string),float(lat_string),float(row[3]),float(row[2]))
+                            #logdiagdata("<<Agent:"+str(row[1])+" Lat:"+str(row[2])+" Long:"+str(row[3])+" Dist:"+str(new_distance)+">>")
+                            if (new_distance < distance_calculated):
+                                closest_agent = int(row[1])
+                                distance_calculated = new_distance
+                        #Right now this is just assigned to agent one - we would run a query for this
                         logdiagdata("--Log Call")
-                        query_string=("INSERT INTO security_user_calls (id,lat_data,long_data,call_flag) VALUES (%s,%s,%s,%s)")
-                        data_string=(closest_agent,lat_string,long_string,'1')
+                        #################################################################
+                        #                   AGENT TABLES UPDATE
+                        #################################################################
+                        #Insert into the database all of the calls and where the agent must go
+                        query_string=("INSERT INTO agent_calls (agent_id,lat_data,long_data,call_flag,user_that_called,call_timestamp) VALUES (%s,%s,%s,%s,%s,%s)")
+                        data_string=(closest_agent,lat_string,long_string,'1',user_id,time.strftime('%Y-%m-%d %H:%M:%S'))
                         cur.execute(query_string,data_string)
                         db.commit()
+                        #Insert into the database all of the calls and where the agent must go
+                        query_string=("INSERT INTO user_requests (user_id,lat_data,long_data,call_flag,responder_id) VALUES (%s,%s,%s,%s,%s)")
+                        data_string=(user_id,lat_string,long_string,'1',closest_agent)
+                        cur.execute(query_string,data_string)
+                        db.commit()                                                                        
                     else:
                         logdiagdata("--No Call")
-                    #fetch all the current locations of agents
-                    query_string=("SELECT * from security_user_current")
-                    cur.execute(query_string)
-                    agent_data = cur.fetchall ()
-                    db.commit()
-                    #----------------------------------------
-                    #fetch all open calls
-                    query_string=("SELECT * from security_user_calls")
-                    cur.execute(query_string)
-                    agent_calls = cur.fetchall ()
-                    db.commit()
-                    # print the rows
-                    response = "<user_data>"
-                    response_call_flag = '0'
-                    user_id_call_flag = '0'
-                    for row in agent_data :
-                        response_call_flag = '0'
-                        user_id_call_flag = '0'
-                        for row_inner in agent_calls:
-                            #If the id of the closest agent (row_inner[1]) equals this agent
-                            #and the flag is indeed set (row_inner[4]) then respond
-                            if ((row[1] == row_inner[1]) and (str(row_inner[4])=='1')):
-                                response_call_flag = '1'
-                                user_id_call_flag = user_that_called
-                                logdiagdata("--Set Response")
-                        response += "<agent_pos><agent_id>"+str(row[1])+"</agent_id><latitude>"+str(row[2])+"</latitude><longitude>"+str(row[3])+"</longitude><responding_status>"+response_call_flag+"</responding_status><responding_to_user>"+str(user_that_called)+"</responding_to_user></agent_pos>"
-                    response += "</user_data>"
-                    #logdiagdata(response)
-                    logdiagdata("--Send Complete")
+
+                    response = build_response()                    
+                    logdiagdata("--User Response Complete")
                 #*******************************    
                 #NOW CHECK THE AGENT MESSAGES
-                #*******************************
-                #message_type = e.find('agent_data')
+                #*******************************                
                 message_type = e.tag
-                print(message_type)
-                if (message_type == 'agent_data'):
-                    logdiagdata("--Agent Data Received")
+                if (message_type == 'agent_data'):                   
                     lat_string=e.find('LatData').text
                     long_string=e.find('LongData').text
                     agent_id = e.find('AgentId').text
-                    accept_flag = e.find('AcceptFlag').text
-                    query_string=("UPDATE security_user_current SET lat_data=%s,long_data=%s WHERE sec_user_id=%s")
-                    data_string=(lat_string,long_string,agent_id)
+                    online_flag = e.find('OnlineFlag').text
+                    call_complete = e.find('CallComplete').text  
+                    logdiagdata("--Update Agent Pos: "+str(agent_id))                                      
+                    #################################################################
+                    #             UPDATE THE CURRENT AGENTS POSITION
+                    ################################################################# 
+                    query_string=("UPDATE agent_current_info SET lat_data=%s,long_data=%s,online_flag=%s WHERE agent_id=%s")
+                    data_string=(lat_string,long_string,online_flag,agent_id)
                     cur.execute(query_string,data_string)
                     db.commit()
-                    #fetch all the current locations of agents
-                    query_string=("SELECT * from security_user_current")
-                    cur.execute(query_string)
-                    agent_data = cur.fetchall ()
+                    if (call_complete == '1'):
+                        query_string=("UPDATE agent_calls SET call_flag=0 WHERE agent_id=%s")
+                        data_string=(agent_id)
+                        cur.execute(query_string,data_string)
+                        db.commit()
+                    response = build_response()
+                    logdiagdata("--Agent Response Complete")
+                #*******************************    
+                #NOW CHECK THE LOGIN MESSAGES
+                #*******************************
+                message_type = e.tag
+                if (message_type == 'login_data'):
+                    logdiagdata("--Login Message")
+                    username = e.find('username').text
+                    password = e.find('password').text
+                    query_string=("SELECT * from operator_list WHERE username=%s AND password=%s")
+                    data_string=(username,password)
+                    cur.execute(query_string,data_string)
                     db.commit()
-                    #----------------------------------------
-                    #fetch all open calls
-                    query_string=("SELECT * from security_user_calls")
-                    cur.execute(query_string)
-                    agent_calls = cur.fetchall ()
-                    db.commit()                  
-                    logdiagdata("--Receive Complete")                
-                    # print the rows
-                    response = "<agent_data>"                    
-                    response_call_flag = '0'
-                    for row in agent_data :
-                        response_call_flag = '0'
-                        for row_inner in agent_calls:
-                            #logdiagdata("--"+str(row[1])+":"+str(row_inner[1])+" "+str(row_inner[4]))
-                            if ((row[1] == row_inner[1]) and (str(row_inner[4])=='1')):
-                                response_call_flag = '1'
-                                logdiagdata("--Set Response")
-                        response += "<agent_pos><agent_id>"+str(row[1])+"</agent_id><latitude>"+str(row[2])+"</latitude><longitude>"+str(row[3])+"</longitude><responding_status>"+response_call_flag+"</responding_status><responding_to_user>"+str(user_that_called)+"</responding_to_user></agent_pos>"
-                    response += "</agent_data>"
-                    #logdiagdata(response)
-                    logdiagdata("--Send Complete")
+                    login_data = cur.fetchall ()
+                    record_exists = cur.rowcount
+                    if (record_exists != 0):
+                        logdiagdata("--Login Successful")
+                        response = build_login_response(username)
+                    else:
+                        logdiagdata("--Login Failed")
+                        logdiagdata(username)
+                        logdiagdata(password)
+                        response = "<login_data><error>No Such User</error></login_data>"
+                    logdiagdata("--Login Response Complete")
+                #*******************************    
+                #NOW RESPOND WITH AGENT DETAILS
+                #*******************************
+                message_type = e.tag
+                if (message_type == 'get_agent_data'):
+                    logdiagdata("--Agent Data Message")
+                    responding_agent_id = e.find('agent_id').text
+                    logdiagdata("--Agent Data Message. Get details for ID: "+responding_agent_id)
+                    query_string=("SELECT * from operator_list WHERE agent_id=%s")
+                    data_string=(responding_agent_id)
+                    cur.execute(query_string,data_string)                    
+                    db.commit()
+                    if (cur.rowcount > 0):
+                        logdiagdata("--Valid Agent Data")
+                        agent_data = cur.fetchall ()
+                        for row in agent_data :
+                            response = "<agent_details><agent_name>"+row[1]+"</agent_name>"
+                            response += "<agent_surname>"+row[2]+"</agent_surname><agent_company>"+row[3]+"</agent_company>"
+                            response += "<agent_registration>"+row[8]+"</agent_registration></agent_details>"  
+                    else:   
+                        logdiagdata("--Invalid Agent Data")
+                        response = "<agent_details><error>Error</error></agent_details>"
+
                 clientsocket.send(response)
             else:
                 logdiagdata("--Junk received")

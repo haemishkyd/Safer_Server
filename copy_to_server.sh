@@ -1,0 +1,2 @@
+scp -r -i /home/haemish/.ssh/my-ssh-key saferserver/* haemish_kyd@130.211.160.234:~/saferserver/.
+#scp -r -i /home/haemish/.ssh/my-ssh-key saferserver/appinterface/views.py haemish_kyd@130.211.160.234:~/saferserver/appinterface/.
